@@ -1,0 +1,48 @@
+# Исполняемые файлы
+server
+client
+
+# Объектные файлы
+*.o
+*.obj
+
+# Библиотеки
+*.a
+*.so
+*.dll
+*.dylib
+
+# Отладочные файлы
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Логи
+*.log
+
+# Временные файлы
+*~
+*.swp
+*.swo
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Сборочные артефакты
+build/
+dist/
+
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+*.cmake
+!CMakeLists.txt
+
+doc/
