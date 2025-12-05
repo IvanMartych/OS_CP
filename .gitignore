@@ -44,5 +44,3 @@ cmake_install.cmake
 Makefile.cmake
 *.cmake
 !CMakeLists.txt
-
-doc/
