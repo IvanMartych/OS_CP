@@ -1,8 +1,10 @@
 #include "common.h"
 #include <signal.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define SERVER_ENDPOINT "tcp://*:5555"
+#define MAX_THREADS 100
 
 // Структура игрока
 typedef struct {
@@ -27,6 +29,16 @@ typedef struct {
 Game games[100];
 int game_count = 0;
 int running = 1;
+pthread_mutex_t games_mutex = PTHREAD_MUTEX_INITIALIZER;
+void *global_context = NULL;
+
+// Структура для передачи данных в поток
+typedef struct {
+    void *socket;
+    Message request;
+    char identity[256];
+    int identity_size;
+} ClientRequest;
 
 void signal_handler(int signum) {
     printf("\nПолучен сигнал %d. Завершение работы сервера...\n", signum);
@@ -34,39 +46,61 @@ void signal_handler(int signum) {
 }
 
 Game* find_game_by_name(const char *name) {
+    pthread_mutex_lock(&games_mutex);
+    Game *result = NULL;
     for (int i = 0; i < game_count; i++) {
         if (strcmp(games[i].name, name) == 0 && games[i].is_active) {
-            return &games[i];
+            result = &games[i];
+            break;
         }
     }
-    return NULL;
+    pthread_mutex_unlock(&games_mutex);
+    return result;
 }
 
 Game* find_available_game() {
+    pthread_mutex_lock(&games_mutex);
+    Game *result = NULL;
     for (int i = 0; i < game_count; i++) {
         if (games[i].is_active && 
             games[i].current_players < games[i].max_players &&
             !games[i].is_finished) {
-            return &games[i];
+            result = &games[i];
+            break;
         }
     }
-    return NULL;
+    pthread_mutex_unlock(&games_mutex);
+    return result;
 }
 
 void handle_create_game(Message *request, Message *response) {
+    pthread_mutex_lock(&games_mutex);
+    
     if (game_count >= 100) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Достигнут лимит игр на сервере");
         return;
     }
     
-    if (find_game_by_name(request->game_name) != NULL) {
+    // Проверка существования игры
+    int game_exists = 0;
+    for (int i = 0; i < game_count; i++) {
+        if (strcmp(games[i].name, request->game_name) == 0 && games[i].is_active) {
+            game_exists = 1;
+            break;
+        }
+    }
+    
+    if (game_exists) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Игра с таким именем уже существует");
         return;
     }
     
     if (request->max_players < 1 || request->max_players > MAX_PLAYERS) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         sprintf(response->error_msg, "Количество игроков должно быть от 1 до %d", MAX_PLAYERS);
         return;
@@ -96,24 +130,37 @@ void handle_create_game(Message *request, Message *response) {
     strcpy(response->game_name, game->name);
     response->max_players = game->max_players;
     response->player_count = game->current_players;
+    
+    pthread_mutex_unlock(&games_mutex);
 }
 
 void handle_join_game(Message *request, Message *response) {
-    Game *game = find_game_by_name(request->game_name);
+    pthread_mutex_lock(&games_mutex);
+    
+    Game *game = NULL;
+    for (int i = 0; i < game_count; i++) {
+        if (strcmp(games[i].name, request->game_name) == 0 && games[i].is_active) {
+            game = &games[i];
+            break;
+        }
+    }
     
     if (game == NULL) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Игра не найдена");
         return;
     }
     
     if (game->is_finished) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Игра уже завершена");
         return;
     }
     
     if (game->current_players >= game->max_players) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Игра заполнена");
         return;
@@ -122,6 +169,7 @@ void handle_join_game(Message *request, Message *response) {
     // Проверяем, не присоединился ли игрок уже
     for (int i = 0; i < game->current_players; i++) {
         if (strcmp(game->players[i].name, request->player_name) == 0) {
+            pthread_mutex_unlock(&games_mutex);
             response->type = MSG_ERROR;
             strcpy(response->error_msg, "Вы уже в этой игре");
             return;
@@ -142,12 +190,25 @@ void handle_join_game(Message *request, Message *response) {
     strcpy(response->game_name, game->name);
     response->max_players = game->max_players;
     response->player_count = game->current_players;
+    
+    pthread_mutex_unlock(&games_mutex);
 }
 
 void handle_find_game(Message *request, Message *response) {
-    Game *game = find_available_game();
+    pthread_mutex_lock(&games_mutex);
+    
+    Game *game = NULL;
+    for (int i = 0; i < game_count; i++) {
+        if (games[i].is_active && 
+            games[i].current_players < games[i].max_players &&
+            !games[i].is_finished) {
+            game = &games[i];
+            break;
+        }
+    }
     
     if (game == NULL) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Нет доступных игр. Создайте новую игру.");
         return;
@@ -156,6 +217,7 @@ void handle_find_game(Message *request, Message *response) {
     // Проверяем, не присоединился ли игрок уже
     for (int i = 0; i < game->current_players; i++) {
         if (strcmp(game->players[i].name, request->player_name) == 0) {
+            pthread_mutex_unlock(&games_mutex);
             response->type = MSG_ERROR;
             strcpy(response->error_msg, "Вы уже в этой игре");
             return;
@@ -176,18 +238,30 @@ void handle_find_game(Message *request, Message *response) {
     strcpy(response->game_name, game->name);
     response->max_players = game->max_players;
     response->player_count = game->current_players;
+    
+    pthread_mutex_unlock(&games_mutex);
 }
 
 void handle_make_guess(Message *request, Message *response) {
-    Game *game = find_game_by_name(request->game_name);
+    pthread_mutex_lock(&games_mutex);
+    
+    Game *game = NULL;
+    for (int i = 0; i < game_count; i++) {
+        if (strcmp(games[i].name, request->game_name) == 0 && games[i].is_active) {
+            game = &games[i];
+            break;
+        }
+    }
     
     if (game == NULL) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Игра не найдена");
         return;
     }
     
     if (game->is_finished) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         sprintf(response->error_msg, "Игра завершена. Победитель: %s", game->winner);
         return;
@@ -203,6 +277,7 @@ void handle_make_guess(Message *request, Message *response) {
     }
     
     if (player == NULL) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Вы не участвуете в этой игре");
         return;
@@ -210,6 +285,7 @@ void handle_make_guess(Message *request, Message *response) {
     
     // Валидация числа
     if (!is_valid_number(request->guess)) {
+        pthread_mutex_unlock(&games_mutex);
         response->type = MSG_ERROR;
         strcpy(response->error_msg, "Неверный формат числа (все цифры должны быть уникальными)");
         return;
@@ -244,9 +320,13 @@ void handle_make_guess(Message *request, Message *response) {
     }
     
     strcpy(response->game_name, game->name);
+    
+    pthread_mutex_unlock(&games_mutex);
 }
 
 void handle_list_games(Message *request, Message *response) {
+    pthread_mutex_lock(&games_mutex);
+    
     response->type = MSG_GAME_LIST;
     response->game_count = 0;
     
@@ -257,6 +337,8 @@ void handle_list_games(Message *request, Message *response) {
         }
     }
     printf("%d\n", response->game_count);
+    
+    pthread_mutex_unlock(&games_mutex);
 }
 
 void process_message(Message *request, Message *response) {
@@ -285,16 +367,36 @@ void process_message(Message *request, Message *response) {
     }
 }
 
+// Обработчик клиента в отдельном потоке
+void* handle_client(void* arg) {
+    ClientRequest *client_req = (ClientRequest*)arg;
+    Message response;
+    
+    // Обрабатываем запрос
+    process_message(&client_req->request, &response);
+    
+    // Отправляем ответ обратно через ROUTER сокет
+    zmq_send(client_req->socket, client_req->identity, client_req->identity_size, ZMQ_SNDMORE);
+    zmq_send(client_req->socket, "", 0, ZMQ_SNDMORE);
+    
+    // Сериализуем и отправляем ответ
+    size_t msg_size = sizeof(Message);
+    zmq_send(client_req->socket, &response, msg_size, 0);
+    
+    free(client_req);
+    return NULL;
+}
+
 int main() {
     printf("========================================\n");
-    printf("Сервер игры 'Быки и Коровы'\n");
+    printf("Сервер игры 'Быки и Коровы' (многопоточный)\n");
     printf("========================================\n\n");
     
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    void *context = zmq_ctx_new();
-    void *socket = zmq_socket(context, ZMQ_REP);
+    global_context = zmq_ctx_new();
+    void *socket = zmq_socket(global_context, ZMQ_ROUTER);
     
     int rc = zmq_bind(socket, SERVER_ENDPOINT);
     if (rc != 0) {
@@ -303,41 +405,71 @@ int main() {
     }
     
     printf("Сервер запущен на %s\n", SERVER_ENDPOINT);
+    printf("Режим: многопоточный (до %d потоков)\n", MAX_THREADS);
     printf("Ожидание подключений...\n\n");
     
     // Установка таймаута для recv
     int timeout = 1000; // 1 секунда
     zmq_setsockopt(socket, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
     
-    Message request, response;
-    
     while (running) {
-        rc = recv_message(socket, &request);
+        ClientRequest *client_req = malloc(sizeof(ClientRequest));
+        if (!client_req) {
+            printf("Ошибка выделения памяти\n");
+            continue;
+        }
         
-        if (rc == -1) {
+        // Получаем identity клиента
+        client_req->identity_size = zmq_recv(socket, client_req->identity, 256, 0);
+        if (client_req->identity_size == -1) {
             if (zmq_errno() == EAGAIN) {
-                // Таймаут, продолжаем
+                free(client_req);
                 continue;
             }
-            printf("Ошибка получения сообщения: %s\n", zmq_strerror(errno));
+            printf("Ошибка получения identity: %s\n", zmq_strerror(errno));
+            free(client_req);
             break;
         }
         
-        process_message(&request, &response);
-        send_message(socket, &response);
+        // Пропускаем разделитель
+        char delimiter[10];
+        rc = zmq_recv(socket, delimiter, 10, 0);
+        if (rc == -1) {
+            printf("Ошибка получения разделителя: %s\n", zmq_strerror(errno));
+            free(client_req);
+            continue;
+        }
+        
+        // Получаем сообщение
+        size_t msg_size = sizeof(Message);
+        rc = zmq_recv(socket, &client_req->request, msg_size, 0);
+        if (rc == -1) {
+            printf("Ошибка получения сообщения: %s\n", zmq_strerror(errno));
+            free(client_req);
+            continue;
+        }
+        
+        client_req->socket = socket;
+        
+        // Создаем новый поток для обработки запроса
+        pthread_t thread;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        
+        if (pthread_create(&thread, &attr, handle_client, client_req) != 0) {
+            printf("Ошибка создания потока\n");
+            free(client_req);
+        }
+        
+        pthread_attr_destroy(&attr);
     }
     
     printf("\nЗакрытие сервера...\n");
     zmq_close(socket);
-    zmq_ctx_destroy(context);
+    zmq_ctx_destroy(global_context);
+    pthread_mutex_destroy(&games_mutex);
     
     printf("Сервер остановлен.\n");
     return 0;
 }
-
-// # Найти процесс
-// ps aux | grep server
-
-// kill PID
-// # Или убить все процессы server
-// pkill -f "./server

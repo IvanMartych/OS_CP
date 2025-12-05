@@ -5,6 +5,23 @@
 // Прототипы функций
 void play_game(void *socket, const char *player_name, const char *game_name);
 
+// Функции для работы с DEALER сокетом
+int send_message_dealer(void *socket, Message *msg) {
+    zmq_send(socket, "", 0, ZMQ_SNDMORE);
+    size_t msg_size = sizeof(Message);
+    return zmq_send(socket, msg, msg_size, 0);
+}
+
+int recv_message_dealer(void *socket, Message *msg) {
+    // Пропускаем разделитель
+    char delimiter[10];
+    zmq_recv(socket, delimiter, 10, 0);
+    
+    // Получаем сообщение
+    size_t msg_size = sizeof(Message);
+    return zmq_recv(socket, msg, msg_size, 0);
+}
+
 void print_menu() {
     printf("\n========================================\n");
     printf("      Игра 'Быки и Коровы'\n");
@@ -96,10 +113,10 @@ void create_game(void *socket, const char *player_name) {
     }
     
     printf("Отправка запроса на сервер...\n");
-    send_message(socket, &request);
+    send_message_dealer(socket, &request);
     
     printf("Ожидание ответа от сервера...\n");
-    recv_message(socket, &response);
+    recv_message_dealer(socket, &response);
     
     if (response.type == MSG_ERROR) {
         printf("Ошибка: %s\n", response.error_msg);
@@ -127,8 +144,8 @@ void join_game(void *socket, const char *player_name) {
     }
     request.game_name[strcspn(request.game_name, "\n")] = 0;
     
-    send_message(socket, &request);
-    recv_message(socket, &response);
+    send_message_dealer(socket, &request);
+    recv_message_dealer(socket, &response);
     
     if (response.type == MSG_ERROR) {
         printf("Ошибка: %s\n", response.error_msg);
@@ -151,8 +168,8 @@ void find_game(void *socket, const char *player_name) {
     
     printf("\nПоиск доступной игры...\n");
     
-    send_message(socket, &request);
-    recv_message(socket, &response);
+    send_message_dealer(socket, &request);
+    recv_message_dealer(socket, &response);
     
     if (response.type == MSG_ERROR) {
         printf("Ошибка: %s\n", response.error_msg);
@@ -172,8 +189,8 @@ void list_games(void *socket) {
     
     request.type = MSG_LIST_GAMES;
     
-    send_message(socket, &request);
-    recv_message(socket, &response);
+    send_message_dealer(socket, &request);
+    recv_message_dealer(socket, &response);
     
     printf("\nАктивных игр на сервере: %d\n", response.game_count);
 }
@@ -202,8 +219,8 @@ void play_game(void *socket, const char *player_name, const char *game_name) {
             continue;
         }
         
-        send_message(socket, &request);
-        recv_message(socket, &response);
+        send_message_dealer(socket, &request);
+        recv_message_dealer(socket, &response);
         
         if (response.type == MSG_ERROR) {
             printf("Ошибка: %s\n", response.error_msg);
@@ -253,7 +270,7 @@ int main() {
     printf("Подключение к серверу...\n");
     
     void *context = zmq_ctx_new();
-    void *socket = zmq_socket(context, ZMQ_REQ);
+    void *socket = zmq_socket(context, ZMQ_DEALER);
     
     int rc = zmq_connect(socket, SERVER_ENDPOINT);
     if (rc != 0) {
